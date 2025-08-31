@@ -8,7 +8,7 @@ load_dotenv()
 
 USER    = (os.getenv("BCIT_USER") or "").strip()
 PASS    = (os.getenv("BCIT_PASS") or "").strip()
-WEBHOOK = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
+WEBHOOK = (os.getenv("TESTING_WEBHOOK_UR") or "").strip()
 CHECK_URL  = os.getenv("CHECK_URL", "https://bcit-csm.symplicity.com/api/v2/jobs")
 RAW_PARAMS = os.getenv("CHECK_PARAMS", "perPage=1&sort=!postdate&json_mode=read_only&enable_translation=false")
 PARAMS     = dict(urllib.parse.parse_qsl(RAW_PARAMS, keep_blank_values=True))
