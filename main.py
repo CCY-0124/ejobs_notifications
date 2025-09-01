@@ -438,46 +438,50 @@ async def pull_jobs(since_day: date):
 
 # ---------- Scheduler functions ----------
 def run_morning_check():
-    """Run morning session check."""
-    asyncio.run(morning_session_check())
+    """Run the async morning session check once (inside its own loop)."""
+    import asyncio
+    asyncio.run(morning_session_check())  # async def morning_session_check()
 
 def run_hourly_scrape():
-    """Run hourly job scraping."""
-    asyncio.run(hourly_job_scrape())
+    """Run the async hourly scrape once (inside its own loop)."""
+    import asyncio
+    asyncio.run(hourly_job_scrape())      # async def hourly_job_scrape()
 
 def start_scheduler():
-    """Start the scheduler for automated tasks."""
-    # Schedule morning session check at 8:00 AM
+    """Start cron-like tasks using the schedule library (sync loop)."""
+    import schedule, time
+
+    # Register jobs
     schedule.every().day.at("08:00").do(run_morning_check)
-    
-    # Schedule job scraping every 2 hours
     schedule.every(2).hours.do(run_hourly_scrape)
-    
+
+    # Fire once immediately so you don't wait 2 hours for the first run
+    run_hourly_scrape()
+
     print("Automated tasks started:")
     print("   - Daily session check at 8:00 AM")
     print("   - Job scraping every 2 hours")
     print("   - Press Ctrl+C to stop")
-    
-    try:
-        while True:
-            schedule.run_pending()
-            time.sleep(60)  # Check every minute
-    except KeyboardInterrupt:
-        print("\nAutomated tasks stopped")
 
-async def main():
-    parser = argparse.ArgumentParser(description="Pull BCIT jobs using state.json; post only those since a date")
+    # Sync loop: no global asyncio loop is running here
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="BCIT jobs fetcher")
     parser.add_argument("--since", help="YYYY-MM-DD; default = today in America/Vancouver (or POST_SINCE in .env)")
     parser.add_argument("--scheduler", action="store_true", help="Start the automated scheduler")
     args = parser.parse_args()
 
     if args.scheduler:
+        # Pure sync mode; callbacks will run their own event loops
         start_scheduler()
-        return
+    else:
+        # One-shot run
+        since_day = parse_since(args.since)
+        print(f"[INFO] Using since date: {since_day} (TZ={TZ_NAME})")
+        import asyncio
+        asyncio.run(pull_jobs(since_day))
 
-    since_day = parse_since(args.since)
-    print(f"[INFO] Using since date: {since_day} (TZ={TZ_NAME})")
-    await pull_jobs(since_day)
-
-if __name__ == "__main__":
-    asyncio.run(main())
