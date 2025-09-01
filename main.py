@@ -414,6 +414,8 @@ async def pull_jobs(since_day: date):
             page_no += 1
             await asyncio.sleep(SLEEP)
 
+        await ctx.storage_state(path=STATE_FILE)
+        print(f"[INFO] Updated storage state written to: {os.path.abspath(STATE_FILE)}")
         await browser.close()
 
     # Post all new jobs in safe-sized chunks with correct page info

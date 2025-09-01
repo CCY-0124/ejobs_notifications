@@ -86,6 +86,8 @@ async def check_with_saved_state(p):
     )
     ok = (res.status == 200) and (res.headers.get("content-type","").startswith("application/json"))
     body = await res.text()
+    await ctx.storage_state(path=STATE_FILE)
+    print(f"[INFO] Updated storage state written to: {STATE_FILE}")
     await browser.close()
     return ok, res.status, res.headers.get("content-type"), len(body), body[:300].replace("\n"," ")
 
