@@ -3,6 +3,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import schedule
+import random
 
 import pandas as pd
 import requests
@@ -27,6 +28,9 @@ SLEEP        = float(os.getenv("REQ_SLEEP", "0.4"))
 TIMEOUT_MS   = int(os.getenv("REQ_TIMEOUT_MS", "20000"))
 TZ_NAME      = os.getenv("LOCAL_TZ", "America/Vancouver")
 ENV_SINCE    = (os.getenv("POST_SINCE") or "").strip()      # optional YYYY-MM-DD in .env
+KEEPALIVE_ENABLED   = (os.getenv("KEEPALIVE_ENABLED", "1").strip() == "1")
+KEEPALIVE_MIN_MIN   = int(os.getenv("KEEPALIVE_MIN_MIN", "30"))
+KEEPALIVE_MAX_MIN   = int(os.getenv("KEEPALIVE_MAX_MIN", "60"))
 
 # ---------- Discord URLs from .env ----------
 TESTING_WEBHOOK = (os.getenv("TESTING_WEBHOOK_URL") or "").strip()
@@ -194,23 +198,26 @@ def discord_post(job: Dict[str, Any], page_no: int | None = None, per_page_hint:
 
 # ---------- Session check helpers ----------
 async def check_session_alive() -> bool:
-    """Check if the saved session is still valid."""
-    if not os.path.exists(STATE_FILE):
-        return False
-    
+    """Return True if session can hit the tiny API, and persist cookies on success."""
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             ctx = await browser.new_context(storage_state=STATE_FILE, user_agent="Mozilla/5.0")
-            
-            # Warm session by visiting the page
+
+            # Warm the session by visiting the UI once
             page = await ctx.new_page()
             await page.goto(TARGET_PAGE, wait_until="domcontentloaded")
-            
-            # Test API call
+
+            # Detect login bounce (expired session)
+            if any(x in page.url.lower() for x in ("login", "signin", "idp")):
+                print("[SESSION] Redirected to login; session expired.")
+                await browser.close()
+                return False
+
+            # Minimal API probe
             res = await ctx.request.get(
                 API_URL,
-                params={"perPage": 1, "sort": RAW_SORT, "json_mode": "read_only"},
+                params={"perPage": 1, "sort": RAW_SORT, "json_mode": "read_only", "enable_translation": "false"},
                 headers={
                     "Accept": "application/json, text/plain, */*",
                     "x-requested-system-user": "students",
@@ -219,12 +226,20 @@ async def check_session_alive() -> bool:
                 },
                 timeout=TIMEOUT_MS,
             )
-            
+            ok = (res.status == 200 and (res.headers.get("content-type", "").startswith("application/json")))
+
+            if ok:
+                # Persist rotated cookies so the next run starts fresh
+                await ctx.storage_state(path=STATE_FILE)
+                print(f"[SESSION] OK (status={res.status}); state saved → {os.path.abspath(STATE_FILE)}")
+            else:
+                print(f"[SESSION] Not OK (status={res.status}); no state write.")
+
             await browser.close()
-            return (res.status == 200 and 
-                   res.headers.get("content-type", "").startswith("application/json"))
+            return ok
+
     except Exception as e:
-        print(f"[ERROR] Session check failed: {e}")
+        print(f"[SESSION] error: {e}")
         return False
 
 async def morning_session_check():
@@ -460,6 +475,8 @@ def start_scheduler():
     # Fire once immediately so you don't wait 2 hours for the first run
     run_hourly_scrape()
 
+    schedule_keep_alive()
+
     print("Automated tasks started:")
     print("   - Daily session check at 8:00 AM")
     print("   - Job scraping every 2 hours")
@@ -469,6 +486,64 @@ def start_scheduler():
     while True:
         schedule.run_pending()
         time.sleep(60)
+
+def schedule_keep_alive():
+    """Schedule the next keep-alive in a random 30–60 minutes window."""
+    if not KEEPALIVE_ENABLED:
+        return
+    delay = random.randint(KEEPALIVE_MIN_MIN, KEEPALIVE_MAX_MIN)
+    schedule.every(delay).minutes.do(run_keep_alive_once).tag("keepalive_once")
+    print(f"[KEEPALIVE] Next ping in {delay} minutes")
+
+def run_keep_alive_once():
+    """Run one keep-alive, then schedule the next at a new random delay."""
+    import asyncio
+    try:
+        asyncio.run(keep_alive_ping())
+    finally:
+        schedule.clear("keepalive_once")  # cancel this one-shot job
+        schedule_keep_alive()             # schedule the next with new random delay
+    return schedule.CancelJob
+
+async def keep_alive_ping() -> bool:
+    """Low-frequency keep-alive: load session, hit a tiny endpoint, and persist rotated cookies."""
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            ctx = await browser.new_context(storage_state=STATE_FILE, user_agent="Mozilla/5.0")
+
+            # Warm the session by visiting the search UI once
+            page = await ctx.new_page()
+            await page.goto(TARGET_PAGE, wait_until="domcontentloaded")
+
+            # Detect login bounce
+            if any(x in page.url.lower() for x in ("login", "signin", "idp")):
+                print("[KEEPALIVE] Session expired (redirected to login).")
+                await browser.close()
+                discord_post_testing("[KEEPALIVE] Session expired; please refresh state.json.")
+                return False
+
+            # Minimal API call
+            res = await ctx.request.get(
+                API_URL,
+                params={"perPage": 1, "sort": RAW_SORT, "json_mode": "read_only", "enable_translation": "false"},
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "x-requested-system-user": "students",
+                    "Referer": TARGET_PAGE,
+                    "User-Agent": "Mozilla/5.0",
+                },
+                timeout=TIMEOUT_MS,
+            )
+            ok = (res.status == 200 and (res.headers.get("content-type","").startswith("application/json")))
+            # Persist any rotated cookies so next run starts fresh
+            await ctx.storage_state(path=STATE_FILE)
+            print(f"[KEEPALIVE] ok={ok} status={res.status} | state saved → {os.path.abspath(STATE_FILE)}")
+            await browser.close()
+            return ok
+    except Exception as e:
+        print(f"[KEEPALIVE] error: {e}")
+        return False
 
 if __name__ == "__main__":
     import argparse
